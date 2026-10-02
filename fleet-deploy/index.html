@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Status</title>
+<style>
+  :root{--bg:#0f172a;--card:#1e293b;--text:#f1f5f9;--muted:#94a3b8;--good:#22c55e;--warn:#f59e0b;--bad:#ef4444;--track:#334155}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:16px}
+  header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;margin-bottom:16px}
+  h1{margin:0;font-size:1.5rem}
+  #meta{color:var(--muted);font-size:.85rem}
+  #grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+  .card{background:var(--card);border-radius:12px;padding:14px;border-top:5px solid var(--good)}
+  .card.attn{border-top-color:var(--bad)}
+  .top{display:flex;justify-content:space-between;align-items:center}
+  .bus{font-size:1.25rem;font-weight:700}
+  .status{font-size:.75rem;font-weight:600;padding:3px 8px;border-radius:999px;background:var(--good);color:#052e16}
+  .status.attn{background:var(--bad);color:#fff}
+  .gauges{display:flex;justify-content:space-around;margin:10px 0 4px}
+  .gauge{text-align:center;width:48%}
+  .gauge svg{width:100%;height:auto;display:block}
+  .gauge .val{font-size:20px;font-weight:700;fill:var(--text)}
+  .gauge .lbl{font-size:.75rem;color:var(--muted);margin-top:-2px}
+  .notes{font-size:.85rem;color:#fcd34d;margin-top:6px}
+  .seen{font-size:.75rem;color:var(--muted);margin-top:8px}
+  .seen.stale{color:var(--warn)}
+  #err{color:var(--bad);display:none;margin-bottom:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fleet Status</h1>
+  <div id="meta">Loading…</div>
+</header>
+<div id="err"></div>
+<div id="grid"></div>
+
+<script>
+const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT-4MqjZZtFggCIJNqdgp1GVSKcGOhAdZMPx4n618ugnFbXzplBG597Dv0DUpTNOVfDcVNeVjhpK6XF/pub?output=csv";
+const REFRESH_MS = 60000;
+
+function parseCSV(text){
+  const rows=[];let row=[],cur="",q=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){
+      if(c==='"'){ if(text[i+1]==='"'){cur+='"';i++;} else q=false; }
+      else cur+=c;
+    } else if(c==='"') q=true;
+    else if(c===","){row.push(cur);cur="";}
+    else if(c==="\n"||c==="\r"){
+      if(c==="\r"&&text[i+1]==="\n")i++;
+      row.push(cur);cur="";rows.push(row);row=[];
+    } else cur+=c;
+  }
+  if(cur!==""||row.length){row.push(cur);rows.push(row);}
+  return rows.filter(r=>r.some(x=>x.trim()!==""));
+}
+
+function pct(v){
+  const n=parseFloat(String(v||"").replace("%","").trim());
+  return isNaN(n)?null:Math.max(0,Math.min(100,n));
+}
+function colorFor(p){ return p===null?"#475569":p<25?"var(--bad)":p<50?"var(--warn)":"var(--good)"; }
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+// Semicircle gauge: label is the column name, e.g. "Fuel %" or "DEF %"
+function renderGauge(label, value){
+  const p = pct(value);
+  const r=40, cx=50, cy=50, len=Math.PI*r;
+  const dash = p===null?0:(p/100)*len;
+  const arc = `M ${cx-r} ${cy} A ${r} ${r} 0 0 1 ${cx+r} ${cy}`;
+  return `<div class="gauge">
+    <svg viewBox="0 0 100 62" role="img" aria-label="${esc(label)} ${p===null?"unknown":p+"%"}">
+      <path d="${arc}" fill="none" stroke="var(--track)" stroke-width="10" stroke-linecap="round"/>
+      <path d="${arc}" fill="none" stroke="${colorFor(p)}" stroke-width="10" stroke-linecap="round" stroke-dasharray="${dash} ${len}"/>
+      <text x="50" y="48" text-anchor="middle" class="val">${p===null?"—":Math.round(p)+"%"}</text>
+    </svg>
+    <div class="lbl">${esc(label)}</div>
+  </div>`;
+}
+
+function isStale(s){
+  const d=new Date(s); if(isNaN(d)) return false;
+  return (Date.now()-d.getTime())>24*3600*1000;
+}
+
+function render(rows){
+  const head=rows[0].map(h=>h.trim());
+  const ix=n=>head.indexOf(n);
+  const I={bus:ix("Bus #"),status:ix("Status"),notes:ix("Notes"),fuel:ix("Fuel %"),def:ix("DEF %"),seen:ix("Last Seen")};
+  const data=rows.slice(1).filter(r=>(r[I.bus]||"").trim());
+  const html=data.map(r=>{
+    const status=(r[I.status]||"").trim()||"Unknown";
+    const good=/good/i.test(status);
+    const seen=(r[I.seen]||"").trim();
+    return `<div class="card ${good?"":"attn"}">
+      <div class="top"><div class="bus">${esc(r[I.bus])}</div><div class="status ${good?"":"attn"}">${esc(status)}</div></div>
+      <div class="gauges">${renderGauge("Fuel %",r[I.fuel])}${renderGauge("DEF %",r[I.def])}</div>
+      ${(r[I.notes]||"").trim()?`<div class="notes">${esc(r[I.notes])}</div>`:""}
+      <div class="seen ${isStale(seen)?"stale":""}">Last seen: ${esc(seen||"n/a")}</div>
+    </div>`;
+  }).join("");
+  document.getElementById("grid").innerHTML=html;
+}
+
+async function load(){
+  try{
+    const res=await fetch(CSV_URL+"&t="+Date.now(),{cache:"no-store"});
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    render(parseCSV(await res.text()));
+    document.getElementById("err").style.display="none";
+    document.getElementById("meta").textContent="Updated "+new Date().toLocaleTimeString()+" · auto-refreshes every minute";
+  }catch(e){
+    const el=document.getElementById("err");
+    el.textContent="Couldn't load fleet data ("+e.message+"). Showing last known data; retrying.";
+    el.style.display="block";
+  }
+}
+load(); setInterval(load,REFRESH_MS);
+</script>
+</body>
+</html>
